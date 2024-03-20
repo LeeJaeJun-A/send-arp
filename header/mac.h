@@ -60,7 +60,7 @@ namespace std {
 	template<>
 	struct hash<Mac> {
 		size_t operator() (const Mac& r) const {
-			return std::_Hash_impl::hash(&r, Mac::SIZE);
+			//return std::_Hash_impl::hash(&r, Mac::SIZE);
 		}
 	};
 }
