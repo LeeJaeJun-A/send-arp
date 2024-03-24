@@ -18,12 +18,12 @@ void usage() {
 	printf("sample: send-arp-test wlan0\n");
 }
 
-typedef struct HandlerData {
+struct HandlerData {
     pcap_t* handle;       // pcap 핸들
     char sender_mac[18];  // MAC 주소를 저장할 버퍼
 };
 
-typedef struct NetworkAddresses{
+struct NetworkAddresses{
     char* macAddress;
     char* ipAddress;
 };
@@ -42,9 +42,9 @@ void arp_reply_handler(u_char *user_data, const struct pcap_pkthdr *pkthdr, cons
 
 	// IP를 확인?
 	
-	snprintf(data->sender_mac, sizeof(data->sender_mac), "%02x:%02x:%02x:%02x:%02x:%02x",
-             arp_hdr->smac_[0], arp_hdr->smac_[1], arp_hdr->smac_[2],
-             arp_hdr->smac_[3], arp_hdr->smac_[4], arp_hdr->smac_[5]);
+	std::string smacStr = static_cast<std::string>(arp_hdr->smac());
+    	strncpy(data->sender_mac, smacStr.c_str(), sizeof(data->sender_mac) - 1);
+    	data->sender_mac[sizeof(data->sender_mac) - 1] = '\0'; 
 	pcap_breakloop(data->handle);
 }
 
